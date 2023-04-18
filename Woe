@@ -1,0 +1,51 @@
+from pyspark.sql.functions import count, sum, col, when, lit, log
+
+# define the columns to calculate WOE for
+columns = ['col1', 'col2', 'col3']
+
+# define the target variable
+target = 'target'
+
+# define the number of top categories to select
+top_categories = 5
+
+# define the "Other" category label
+other_label = "Other"
+
+# combine all other categories into the "Other" category
+df = df.withColumn(target, when(col(target).isin(df.groupBy(target).agg(countDistinct(col(columns[0])).alias("count")).sort(desc("count")).take(top_categories)), col(target)).otherwise(lit(other_label)))
+
+# calculate the total count of the target variable
+total_target_count = df.count()
+
+# calculate the prior probability for each category of the target variable
+prior_probs = df.groupBy(target).agg(count('*').alias('target_count')).withColumn('prior_prob', col('target_count') / total_target_count)
+
+# loop through the columns and calculate the WOE for each one
+woe_dfs = []
+for column in columns:
+    # compute the target counts for each category
+    target_counts = df.groupBy(column, target).agg(count('*').alias('count'))
+    
+    # combine all other categories into the "Other" category
+    other_counts = target_counts.filter(~col(column).isin(df.groupBy(column).agg(countDistinct(col(target)).alias("count")).sort(desc("count")).take(top_categories))).agg(sum('count').alias('count'))
+    target_counts = target_counts.filter(col(column).isin(df.groupBy(column).agg(countDistinct(col(target)).alias("count")).sort(desc("count")).take(top_categories))).union(other_counts.withColumn(column, lit(other_label)))
+    
+    total_counts = target_counts.groupBy(column).agg(sum('count').alias('total_count'))
+    ratio_df = target_counts.join(total_counts, column).select(target_counts[column], target_counts[target], 
+                                                                target_counts['count'], total_counts['total_count'])
+    # join the prior probability dataframe with the ratio dataframe and calculate the WOE
+    woe = ratio_df.join(prior_probs, target).withColumn(column + '_woe', log(col('count') / col('total_count') / col('prior_prob')))
+    
+    # select only the necessary columns
+    woe = woe.select(column, target, column + '_woe')
+    
+    # add the WOE dataframe to the list of dataframes
+    woe_dfs.append(woe)
+
+# merge the WOE dataframes with the original dataframe
+for woe in woe_dfs:
+    df = df.join(woe, on=[column, target], how='left')
+
+# remove duplicates
+df = df.distinct()
