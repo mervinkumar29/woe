@@ -1,0 +1,54 @@
+from pyspark.sql.functions import count, sum, when, log, col
+
+# define the columns to calculate WOE for
+columns = ['col1', 'col2', 'col3']
+
+# define the target variable
+target = 'target'
+
+# define the top n categories to keep
+n = 5
+
+# group by the column and target variable, and count the occurrences of each category
+counts_df = df.groupBy(target, *columns).agg(count('*').alias('count'))
+
+# get the total count of the target variable
+total_count = df.count()
+
+# get the count of each category of the target variable
+target_counts = df.groupBy(target).agg(count('*').alias('target_count'))
+
+# calculate the prior probability for each category of the target variable
+prior_probs = target_counts.withColumn('prior_prob', col('target_count') / total_count)
+
+# get the top n categories for each column
+top_n_categories = {}
+for column in columns:
+    top_n_categories[column] = [x[column] for x in df.groupBy(column).agg(count('*').alias('count')).orderBy('count', ascending=False).limit(n).collect()]
+
+# replace all categories not in the top n with "Other"
+for column in columns:
+    df = df.withColumn(column, when(col(column).isin(top_n_categories[column]), col(column)).otherwise('Other'))
+
+# group by the column and target variable again, and count the occurrences of each category (with "Other" category included)
+counts_df_with_other = df.groupBy(target, *columns).agg(count('*').alias('count'))
+
+# join the counts dataframe with the prior probability dataframe
+woe_df = counts_df_with_other.join(prior_probs, target)
+
+# calculate the WOE and IV for each category
+for column in columns:
+    woe_iv_df = woe_df.withColumn('woe_' + column, log((when(col(column) == 'Other', 0).otherwise(col('count') / total_count)) / col('prior_prob')))
+    woe_iv_df = woe_iv_df.withColumn('iv_' + column, (when(col(column) == 'Other', 0).otherwise(col('count') / total_count - col('prior_prob'))) * col('woe_' + column)
+
+# group by the column and target variable again, and sum the IV for each category
+iv_df = woe_iv_df.groupBy(*columns).agg(sum('iv_' + column).alias('iv_' + column) for column in columns)
+
+# get the total IV for each column
+total_iv = iv_df.agg(sum('iv_' + column).alias('total_iv_' + column) for column in columns)
+
+# calculate the WOE for each category
+woe_df = woe_iv_df.select(target, *columns, *[col('woe_' + column).alias('woe_' + column) for column in columns]).groupBy(target, *columns).agg({'woe_' + column: 'mean' for column in columns}).select(target, *columns, *[col('avg(woe_' + column + ')').alias('woe_' + column) for column in columns])
+
+# replace null WOE values with 0
+woe_df = woe_df.na.fill(0, [col('woe_' + column) for column in columns])
