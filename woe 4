@@ -1,0 +1,9 @@
+# get the top n categories for each column
+top_n_categories = {}
+for column in columns:
+    top_n_categories[column] = [x[column] for x in df.groupBy(column).agg(count('*').alias('count')).orderBy('count', ascending=False).limit(n).collect()]
+
+# replace categories ranked lower than the top n with "Other"
+for column in columns:
+    df = df.withColumn(column, when(col(column).isin(top_n_categories[column]), col(column)).otherwise('Other'))
+    df = df.withColumn(column, when(col(column) == 'Other', col(column)).otherwise(lit('Other')))
