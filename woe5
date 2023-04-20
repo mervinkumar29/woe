@@ -1,0 +1,53 @@
+from pyspark.sql.functions import count, sum, when, log, col
+
+# define the columns to calculate WOE for
+columns = ['col1', 'col2', 'col3']
+
+# define the target variable
+target = 'target'
+
+# define the number of top categories to keep
+n = 5
+
+# group by the column and target variable, and count the occurrences of each category
+counts_df = df.groupBy(target, *columns).agg(count('*').alias('count'))
+
+# get the total count of the target variable
+total_count = df.count()
+
+# get the count of each category of the target variable
+target_counts = df.groupBy(target).agg(count('*').alias('target_count'))
+
+# calculate the prior probability for each category of the target variable
+prior_probs = target_counts.withColumn('prior_prob', col('target_count') / total_count)
+
+# define a dictionary to store the top n categories for each column
+top_n_categories = {}
+
+# loop over each column
+for column in columns:
+    # get the top n categories based on frequency counts
+    top_categories = [x[column] for x in df.groupBy(column).agg(count('*').alias('count')).orderBy('count', ascending=False).limit(n).collect()]
+    # group the rest as "Other"
+    df = df.withColumn(column, when(col(column).isin(top_categories), col(column)).otherwise('Other'))
+    # store the top n categories for the column in the dictionary
+    top_n_categories[column] = top_categories + ['Other']
+
+# group by the column and target variable again, and count the occurrences of each category (with "Other" category included)
+counts_df_with_other = df.groupBy(target, *columns).agg(count('*').alias('count'))
+
+# join the counts dataframe with the prior probability dataframe
+woe_df = counts_df_with_other.join(prior_probs, target)
+
+# calculate the WOE and IV for each category for the top n categories and "Other" group separately
+for column in columns:
+    # get the distinct categories for the column
+    categories = top_n_categories[column]
+    # loop over each category
+    for category in categories:
+        # calculate the WOE and IV for the category
+        woe_df = woe_df.withColumn('woe_' + column + '_' + category, log((count(when((col(column) == category) & (col(target) == 1), 1)) / count(when(col(column) == category, 1)) + 1) / (count(when((col(column) == category) & (col(target) == 0), 1)) / count(when(col(column) == category, 1)) + 1)))
+        woe_df = woe_df.withColumn('iv_' + column + '_' + category, ((count(when((col(column) == category) & (col(target) == 1), 1)) / count(when(col(column) == category, 1))) - (count(when((col(column) == category) & (col(target) == 0), 1)) / count(when(col(column) == category, 1)))) * woe_df['woe_' + column + '_' + category])
+    
+# group by the column and target variable again, and sum the IV for each category
+iv_df = woe_df.groupBy(*columns).agg(*[sum('iv_' + column + '_' + category
