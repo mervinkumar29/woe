@@ -1,0 +1,53 @@
+from pyspark.sql.functions import count, log, col
+
+# define the columns to calculate WOE for
+columns = ['col1', 'col2', 'col3']
+
+# define the target variable
+target = 'target'
+
+# define the top n categories to keep
+n = 5
+
+# group by the column and target variable, and count the occurrences of each category
+counts_df = df.groupBy(target, *columns).agg(count('*').alias('count'))
+
+# get the total count of the target variable
+total_count = df.count()
+
+# get the count of each category of the target variable
+target_counts = df.groupBy(target).agg(count('*').alias('target_count'))
+
+# calculate the prior probability for each category of the target variable
+prior_probs = target_counts.withColumn('prior_prob', col('target_count') / total_count)
+
+# get the top n categories for each column
+top_n_categories = {}
+for column in columns:
+    top_n_categories[column] = [x[column] for x in df.groupBy(column).agg(count('*').alias('count')).orderBy('count', ascending=False).limit(n).collect()]
+
+# replace all categories not in the top n with "Other"
+for column in columns:
+    df = df.withColumn(column, when(col(column).isin(top_n_categories[column]), col(column)).otherwise('Other'))
+
+# group by the column and target variable again, and count the occurrences of each category (with "Other" category included)
+counts_df_with_other = df.groupBy(target, *columns).agg(count('*').alias('count'))
+
+# join the counts dataframe with the prior probability dataframe
+woe_df = counts_df_with_other.join(prior_probs, target)
+
+# calculate the WOE for each category
+for column in columns:
+    woe_df = woe_df.withColumn('woe_' + column, log((col('count') / total_count) / col('prior_prob')))
+
+# select only the top n categories and "Other"
+woe_df = woe_df.withColumn('rn', row_number().over(Window.partitionBy(*columns).orderBy(col('count').desc())))
+woe_df = woe_df.filter((col('rn') <= n) | (col('col1') == 'Other'))
+woe_df = woe_df.drop('rn')
+
+# replace null WOE values with 0
+woe_df = woe_df.na.fill({column: 0 for column in woe_df.columns if 'woe' in column})
+
+# select the columns to keep
+select_columns = [target] + columns + ['woe_' + column for column in columns if 'woe' in column]
+woe_df = woe_df.select(*select_columns)
